@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     let llm = LLMBuilder::new()
         .backend(LLMBackend::Anthropic) // or LLMBackend::Anthropic, LLMBackend::Ollama, LLMBackend::DeepSeek, LLMBackend::XAI, LLMBackend::Phind ...
         .api_key(std::env::var("ANTHROPIC_API_KEY").context("Failed to get ANTHROPIC_API_KEY")?)
-        //.model("claude-3-5-sonnet-20240620") // or model("claude-3-5-sonnet-20240620") or model("grok-2-latest") or model("deepseek-chat") or model("llama3.1") or model("Phind-70B") ...
+        .model("claude-3-5-sonnet-20241022")
         .max_tokens(1500)
         .temperature(0.0)
         //.system("You are a helpful assistant.")
