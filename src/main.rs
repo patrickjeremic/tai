@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use indicatif::ProgressBar;
 use rllm::{
     builder::{LLMBackend, LLMBuilder},
     chat::{ChatMessage, ChatRole},
     LLMProvider,
 };
 use serde::{Deserialize, Serialize};
+use spinoff::{spinners, Color, Spinner};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -13,7 +13,7 @@ fn main() -> Result<()> {
         eprintln!("Usage: {} <message>", args[0]);
         std::process::exit(1);
     }
-    let input = &args[1..].join(" ");
+    let user_input = &args[1..].join(" ");
 
     let llm = LLMBuilder::new()
         .backend(LLMBackend::Anthropic) // or LLMBackend::Anthropic, LLMBackend::Ollama, LLMBackend::DeepSeek, LLMBackend::XAI, LLMBackend::Phind ...
@@ -26,10 +26,11 @@ fn main() -> Result<()> {
         .build()
         .context("Failed to build LLM")?;
 
-    let messages = vec![ChatMessage {
-        role: ChatRole::User,
-        content: format!(
-            r#"You are an ai assistant that is running on the terminal.
+    let mut session = Session::new(&llm);
+
+    // execute first step
+    session.step(&format!(
+                r#"You are an ai assistant that is running on the terminal.
 Your goal is to assist the user in reaching his goal.
 
 These are the rules that you have to obey:
@@ -52,26 +53,15 @@ The "result" is the actual command or answer.
 - If you need to provide an answer that contains an example command without actual proper parameters still use the "type" "answer".
 
 The user asks:
-{input}"#
-        ),
-    }];
+{user_input}"#
+            ))?;
 
-    // TODO: stremaing output
-    // TODO: input from stdin apart from args
-    //
-    // instructions: if it is a question do this, if it imperative do that
-
-    let bar = ProgressBar::new_spinner();
-    let text = llm.chat(&messages).context("Chat failed")?;
-    bar.finish();
-
-    let result: Response = serde_json::from_str(&text).context("Failed to parse response")?;
-    match result.r#type.as_str() {
-        "command" => handle_command(llm, messages.clone(), &result)?,
-        "answer" => handle_answer(&result)?,
-        _ => anyhow::bail!("Unknown response type: {}", result.r#type),
-    }
     Ok(())
+}
+
+pub struct Session<'a> {
+    llm: &'a Box<dyn LLMProvider>,
+    history: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -81,80 +71,92 @@ struct Response {
     pub r#continue: bool,
 }
 
-fn handle_command(
-    llm: Box<dyn LLMProvider>,
-    mut history: Vec<ChatMessage>,
-    response: &Response,
-) -> Result<()> {
-    println!("$ {}", response.result);
-    print!("Do you want to execute this command? [y/N] ");
-    std::io::Write::flush(&mut std::io::stdout()).context("Failed to flush stdout")?;
-
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .context("Failed to read user input")?;
-
-    if input.trim().to_lowercase() != "y" {
-        println!("Command execution cancelled");
-        return Ok(());
+impl<'a> Session<'a> {
+    pub fn new(llm: &'a Box<dyn LLMProvider>) -> Self {
+        Self {
+            llm,
+            history: Vec::new(),
+        }
     }
 
-    println!("Executing command...");
-    let output = if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd")
-            .args(["/C", &response.result])
-            .output()
-    } else {
-        std::process::Command::new("sh")
-            .args(["-c", &response.result])
-            .output()
-    }
-    .context("Failed to execute command")?;
+    pub fn step(&mut self, input: &str) -> Result<()> {
+        let mut spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Command failed: {}", stderr);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    println!("{}", stdout);
-
-    if response.r#continue {
-        println!("NEXT LOOP");
-
-        // append message
-        history.push(ChatMessage {
-            role: ChatRole::Assistant,
-            content: serde_json::to_string_pretty(&response).unwrap(),
-        });
-        history.push(ChatMessage {
+        self.history.push(ChatMessage {
             role: ChatRole::User,
-            content: format!(
-                r#"The output of {} is:
-
-        {}"#,
-                response.result, stdout
-            ),
+            content: input.to_string(),
         });
 
-        let bar = ProgressBar::new_spinner();
-        let text = llm.chat(&history).context("Chat failed")?;
-        bar.finish();
+        let text = self.llm.chat(&self.history).context("Chat failed")?;
+        self.history.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: text.clone(),
+        });
 
         let result: Response = serde_json::from_str(&text).context("Failed to parse response")?;
+
+        spinner.clear();
+
         match result.r#type.as_str() {
-            "command" => handle_command(llm, history.clone(), &result)?,
-            "answer" => handle_answer(&result)?,
+            "command" => self.handle_command(&result),
+            "answer" => self.handle_answer(&result),
             _ => anyhow::bail!("Unknown response type: {}", result.r#type),
         }
     }
 
-    Ok(())
-}
+    fn handle_command(&mut self, response: &Response) -> Result<()> {
+        println!("> {}", response.result);
+        print!("Do you want to execute this command? [Y/n] ");
+        std::io::Write::flush(&mut std::io::stdout()).context("Failed to flush stdout")?;
 
-fn handle_answer(response: &Response) -> Result<()> {
-    // TODO: Implement answer handling
-    println!("{}", response.result);
-    Ok(())
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read user input")?;
+
+        if input.trim().to_lowercase() == "n" {
+            println!("Command execution cancelled");
+            return Ok(());
+        }
+
+        print!("\x1B[1A\x1B[2K\r"); // Move up 1 line and clear it
+        print!("\x1B[2K\r"); // Clear current line
+
+        let mut spinner = Spinner::new(spinners::Dots, "Executing...", Color::Blue);
+        let output = if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/C", &response.result])
+                .output()
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", &response.result])
+                .output()
+        }
+        .context("Failed to execute command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Command failed: {}", stderr);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        spinner.clear();
+        println!("$ {}", stdout);
+
+        if response.r#continue {
+            self.step(&format!(
+                r#"The output of {} is:
+
+{}"#,
+                response.result, stdout
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn handle_answer(&mut self, response: &Response) -> Result<()> {
+        println!("{}", response.result);
+        Ok(())
+    }
 }

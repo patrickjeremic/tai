@@ -31,7 +31,27 @@ curl -X POST -H "Content-Type: application/json" -d '{"key":"value"}' https://ex
 https://example.com/api/endpoint: The URL endpoint to send the request to
 ```
 
-Examples:
+```
+tai find the process with the highest memory usage and give me its startup command in multiple steps.
+                                                                                                                                   
+---
+$ ps aux --sort=-%mem | head -n 2 | tail -n 1 | awk '{print $2}'
+Do you want to execute this command? [y/N] y
+Executing command...
+1962302
+
+                                                                                                                                   
+---
+$ ps -p 1962302 -o command=
+Do you want to execute this command? [y/N] y
+Executing command...
+/home/patrick/.local/share/nvim/mason/bin/rust-analyzer
+
+```
+
+
+
+More use cases:
 
 
 ```
