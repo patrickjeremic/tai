@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use futures::future::{BoxFuture, FutureExt};
 use rllm::{
     builder::{LLMBackend, LLMBuilder},
     chat::{ChatMessage, ChatRole},
@@ -7,7 +8,8 @@ use rllm::{
 use serde::{Deserialize, Serialize};
 use spinoff::{spinners, Color, Spinner};
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <message>", args[0]);
@@ -54,8 +56,7 @@ The "result" is the actual command or answer.
 
 The user asks:
 {user_input}"#
-            ))?;
-
+            )).await?;
     Ok(())
 }
 
@@ -79,80 +80,88 @@ impl<'a> Session<'a> {
         }
     }
 
-    pub fn step(&mut self, input: &str) -> Result<()> {
-        let mut spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
+    pub fn step<'b>(&'b mut self, input: &'b str) -> BoxFuture<'b, Result<()>> {
+        async move {
+            let mut spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
 
-        self.history.push(ChatMessage {
-            role: ChatRole::User,
-            content: input.to_string(),
-        });
+            self.history.push(ChatMessage {
+                role: ChatRole::User,
+                content: input.to_string(),
+            });
 
-        let text = self.llm.chat(&self.history).context("Chat failed")?;
-        self.history.push(ChatMessage {
-            role: ChatRole::Assistant,
-            content: text.clone(),
-        });
+            let text = self.llm.chat(&self.history).await.context("Chat failed")?;
+            self.history.push(ChatMessage {
+                role: ChatRole::Assistant,
+                content: text.clone(),
+            });
 
-        let result: Response = serde_json::from_str(&text).context("Failed to parse response")?;
+            let result: Response =
+                serde_json::from_str(&text).context("Failed to parse response")?;
 
-        spinner.clear();
+            spinner.clear();
 
-        match result.r#type.as_str() {
-            "command" => self.handle_command(&result),
-            "answer" => self.handle_answer(&result),
-            _ => anyhow::bail!("Unknown response type: {}", result.r#type),
+            match result.r#type.as_str() {
+                "command" => self.handle_command(&result).await,
+                "answer" => self.handle_answer(&result),
+                _ => anyhow::bail!("Unknown response type: {}", result.r#type),
+            }
         }
+        .boxed()
     }
 
-    fn handle_command(&mut self, response: &Response) -> Result<()> {
-        println!("> {}", response.result);
-        print!("Do you want to execute this command? [Y/n] ");
-        std::io::Write::flush(&mut std::io::stdout()).context("Failed to flush stdout")?;
+    fn handle_command<'b>(&'b mut self, response: &'b Response) -> BoxFuture<'b, Result<()>> {
+        async move {
+            println!("> {}", response.result);
+            print!("Do you want to execute this command? [Y/n] ");
+            std::io::Write::flush(&mut std::io::stdout()).context("Failed to flush stdout")?;
 
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .context("Failed to read user input")?;
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("Failed to read user input")?;
 
-        if input.trim().to_lowercase() == "n" {
-            println!("Command execution cancelled");
-            return Ok(());
-        }
+            if input.trim().to_lowercase() == "n" {
+                println!("Command execution cancelled");
+                return Ok(());
+            }
 
-        print!("\x1B[1A\x1B[2K\r"); // Move up 1 line and clear it
-        print!("\x1B[2K\r"); // Clear current line
+            print!("\x1B[1A\x1B[2K\r"); // Move up 1 line and clear it
+            print!("\x1B[2K\r"); // Clear current line
 
-        let mut spinner = Spinner::new(spinners::Dots, "Executing...", Color::Blue);
-        let output = if cfg!(target_os = "windows") {
-            std::process::Command::new("cmd")
-                .args(["/C", &response.result])
-                .output()
-        } else {
-            std::process::Command::new("sh")
-                .args(["-c", &response.result])
-                .output()
-        }
-        .context("Failed to execute command")?;
+            let mut spinner = Spinner::new(spinners::Dots, "Executing...", Color::Blue);
+            let output = if cfg!(target_os = "windows") {
+                std::process::Command::new("cmd")
+                    .args(["/C", &response.result])
+                    .output()
+            } else {
+                std::process::Command::new("sh")
+                    .args(["-c", &response.result])
+                    .output()
+            }
+            .context("Failed to execute command")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Command failed: {}", stderr);
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Command failed: {}", stderr);
+            }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        spinner.clear();
-        println!("$ {}", stdout);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            spinner.clear();
+            println!("{}", stdout);
 
-        if response.r#continue {
-            self.step(&format!(
-                r#"The output of {} is:
+            if response.r#continue {
+                self.step(&format!(
+                    r#"The output of {} is:
 
 {}"#,
-                response.result, stdout
-            ))
-        } else {
-            Ok(())
+                    response.result, stdout
+                ))
+                .await
+            } else {
+                Ok(())
+            }
         }
+        .boxed()
     }
 
     fn handle_answer(&mut self, response: &Response) -> Result<()> {
