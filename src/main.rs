@@ -8,6 +8,34 @@ use rllm::{
 use serde::{Deserialize, Serialize};
 use spinoff::{spinners, Color, Spinner};
 
+fn setup() -> Result<Box<dyn LLMProvider>> {
+    let builder = LLMBuilder::new()
+        .max_tokens(1500)
+        .temperature(0.0)
+        .stream(false);
+
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !key.is_empty() {
+            return builder
+                .backend(LLMBackend::Anthropic)
+                .api_key(
+                    std::env::var("ANTHROPIC_API_KEY")
+                        .context("Failed to get ANTHROPIC_API_KEY")?,
+                )
+                .model("claude-3-5-sonnet-20241022")
+                .build()
+                .context("Failed to build Anthropic Client");
+        }
+    }
+
+    // fallback to ollama using deepseek-r1
+    builder
+        .backend(LLMBackend::Ollama)
+        .model("deepseek-r1:8b")
+        .build()
+        .context("Failed to build Ollama Client")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -17,17 +45,7 @@ async fn main() -> Result<()> {
     }
     let user_input = &args[1..].join(" ");
 
-    let llm = LLMBuilder::new()
-        .backend(LLMBackend::Anthropic) // or LLMBackend::Anthropic, LLMBackend::Ollama, LLMBackend::DeepSeek, LLMBackend::XAI, LLMBackend::Phind ...
-        .api_key(std::env::var("ANTHROPIC_API_KEY").context("Failed to get ANTHROPIC_API_KEY")?)
-        .model("claude-3-5-sonnet-20241022")
-        .max_tokens(1500)
-        .temperature(0.0)
-        //.system("You are a helpful assistant.")
-        .stream(false)
-        .build()
-        .context("Failed to build LLM")?;
-
+    let llm = setup()?;
     let mut session = Session::new(&llm);
 
     // execute first step

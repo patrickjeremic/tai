@@ -96,3 +96,9 @@ $ tai explain "awk '{print $1}'"
 $ tai "what's the difference between -v and -vv in this command?"
 ```
 
+# TODO
+
+- Add executed commands to shell history for easier editing (sh, bash, zsh, fish)
+- Allow piping data into the llm
+- Allow piping output from llm
+
