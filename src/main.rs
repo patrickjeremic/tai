@@ -147,6 +147,16 @@ impl<'a> Session<'a> {
             print!("\x1B[2K\r"); // Clear current line
 
             let mut spinner = Spinner::new(spinners::Dots, "Executing...", Color::Blue);
+            let mut spinning = true;
+
+            // Check if command contains sudo and clear spinner immediately
+            // This ensures password input will work
+            let contains_sudo = response.result.contains("sudo ");
+            if contains_sudo && !cfg!(target_os = "windows") {
+                spinner.clear();
+                spinning = false;
+            }
+
             let output = if cfg!(target_os = "windows") {
                 std::process::Command::new("cmd")
                     .args(["/C", &response.result])
@@ -164,20 +174,23 @@ impl<'a> Session<'a> {
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
-            spinner.clear();
+            if spinning {
+                spinner.clear();
+            }
             println!("{}", stdout);
 
             if response.r#continue {
-                self.step(&format!(
-                    r#"The output of {} is:
+                return self
+                    .step(&format!(
+                        r#"The output of {} is:
 
 {}"#,
-                    response.result, stdout
-                ))
-                .await
-            } else {
-                Ok(())
+                        response.result, stdout
+                    ))
+                    .await;
             }
+
+            Ok(())
         }
         .boxed()
     }
