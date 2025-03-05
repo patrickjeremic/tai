@@ -168,16 +168,33 @@ impl<'a> Session<'a> {
             }
             .context("Failed to execute command")?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("Command failed: {}", stderr);
-            }
-
+            // Combine stdout and stderr
             let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // Create combined output
+            let combined_output = if stderr.is_empty() {
+                stdout.to_string()
+            } else if stdout.is_empty() {
+                stderr.to_string()
+            } else {
+                format!("{}\n{}", stdout, stderr)
+            };
+
             if spinning {
                 spinner.clear();
             }
-            println!("{}", stdout);
+
+            // Print combined output regardless of success
+            println!("{}", combined_output.trim_end());
+
+            // If command failed, show a warning but continue
+            if !output.status.success() {
+                eprintln!(
+                    "Note: Command exited with non-zero status: {}",
+                    output.status
+                );
+            }
 
             if response.r#continue {
                 return self
