@@ -101,4 +101,8 @@ $ tai "what's the difference between -v and -vv in this command?"
 - Add executed commands to shell history for easier editing (sh, bash, zsh, fish)
 - Allow piping data into the llm
 - Allow piping output from llm
-
+- Allow sandboxed command execution (via docker or containerd)
+- Allow the model to access the internet/search (e.g. via google/duckduckgo/etc.)
+- Allow parsing .taicontext files in current PWD to get additional project context
+- Allow context files to reference files and folders with simple syntax
+- Add HTMX based Chat Webinterface to interact with tai
