@@ -8,6 +8,9 @@ use rllm::{
 use serde::{Deserialize, Serialize};
 use spinoff::{spinners, Color, Spinner};
 
+mod history;
+use history::History;
+
 fn setup() -> Result<Box<dyn LLMProvider>> {
     let builder = LLMBuilder::new()
         .max_tokens(1500)
@@ -49,8 +52,91 @@ async fn main() -> Result<()> {
     let mut session = Session::new(&llm);
 
     // execute first step
-    session.step(&format!(
-                r#"You are an ai assistant that is running on the terminal.
+    session.step(user_input).await?;
+    Ok(())
+}
+
+pub struct Session<'a> {
+    llm: &'a Box<dyn LLMProvider>,
+    history: Vec<ChatMessage>,
+    file_history: History,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Response {
+    pub r#type: String,
+    pub result: String,
+    pub r#continue: bool,
+}
+
+impl<'a> Session<'a> {
+    pub fn new(llm: &'a Box<dyn LLMProvider>) -> Self {
+        let file_history = History::load().unwrap_or_default();
+
+        Self {
+            llm,
+            history: Vec::new(),
+            file_history,
+        }
+    }
+
+    pub fn step<'b>(&'b mut self, input: &'b str) -> BoxFuture<'b, Result<()>> {
+        async move {
+            let mut spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
+
+            // Build the prompt with history context
+            let prompt = self.build_prompt(input);
+
+            self.history.push(ChatMessage {
+                role: ChatRole::User,
+                content: prompt,
+            });
+
+            let text = self.llm.chat(&self.history).await.context("Chat failed")?;
+            self.history.push(ChatMessage {
+                role: ChatRole::Assistant,
+                content: text.clone(),
+            });
+
+            // Save to history file
+            self.file_history
+                .add_entry(input.to_string(), text.clone())?;
+
+            let result: Response =
+                serde_json::from_str(&text).context("Failed to parse response")?;
+
+            spinner.clear();
+
+            match result.r#type.as_str() {
+                "command" => self.handle_command(&result).await,
+                "answer" => self.handle_answer(&result),
+                _ => anyhow::bail!("Unknown response type: {}", result.r#type),
+            }
+        }
+        .boxed()
+    }
+
+    fn build_prompt(&self, input: &str) -> String {
+        let relevant_entries = self.file_history.get_relevant_entries();
+
+        let mut history_context = String::new();
+        if !relevant_entries.is_empty() {
+            history_context.push_str("\nHere are some of your previous interactions (these may not be related to the current query and are just for reference):\n\n");
+
+            for (idx, (entry, age)) in relevant_entries.iter().enumerate() {
+                let minutes = age.num_minutes();
+                history_context.push_str(&format!(
+                    "Interaction {} (from {} minutes ago):\n",
+                    idx + 1,
+                    minutes
+                ));
+                history_context.push_str(&format!("User: {}\n", entry.user_input));
+                history_context.push_str(&format!("Assistant: {}\n\n", entry.llm_response));
+            }
+        }
+
+        format!(
+            r#"You are an ai assistant that is running on the terminal.
 Your goal is to assist the user in reaching his goal.
 
 These are the rules that you have to obey:
@@ -71,60 +157,10 @@ The "result" is the actual command or answer.
 - If this is the last command of the chain respond with "continue" set to false.
 - If the result can be achieved by piping don't use "continue" but provide the command with pipes directly - be extra cautious when using case-sensitive grep.
 - If you need to provide an answer that contains an example command without actual proper parameters still use the "type" "answer".
-
+{history_context}
 The user asks:
-{user_input}"#
-            )).await?;
-    Ok(())
-}
-
-pub struct Session<'a> {
-    llm: &'a Box<dyn LLMProvider>,
-    history: Vec<ChatMessage>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Response {
-    pub r#type: String,
-    pub result: String,
-    pub r#continue: bool,
-}
-
-impl<'a> Session<'a> {
-    pub fn new(llm: &'a Box<dyn LLMProvider>) -> Self {
-        Self {
-            llm,
-            history: Vec::new(),
-        }
-    }
-
-    pub fn step<'b>(&'b mut self, input: &'b str) -> BoxFuture<'b, Result<()>> {
-        async move {
-            let mut spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
-
-            self.history.push(ChatMessage {
-                role: ChatRole::User,
-                content: input.to_string(),
-            });
-
-            let text = self.llm.chat(&self.history).await.context("Chat failed")?;
-            self.history.push(ChatMessage {
-                role: ChatRole::Assistant,
-                content: text.clone(),
-            });
-
-            let result: Response =
-                serde_json::from_str(&text).context("Failed to parse response")?;
-
-            spinner.clear();
-
-            match result.r#type.as_str() {
-                "command" => self.handle_command(&result).await,
-                "answer" => self.handle_answer(&result),
-                _ => anyhow::bail!("Unknown response type: {}", result.r#type),
-            }
-        }
-        .boxed()
+{input}"#
+        )
     }
 
     fn handle_command<'b>(&'b mut self, response: &'b Response) -> BoxFuture<'b, Result<()>> {
