@@ -7,6 +7,9 @@ edition = "2021"
 # error handling
 anyhow = "1.0"
 
+# cli
+clap = { version = "4.5", features = ["derive", "cargo"] }
+
 # async
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "fs", "signal", "rt"] }
 futures = "0.3"
@@ -17,9 +20,13 @@ rllm = { version = "1.1", features = ["openai", "anthropic", "ollama"] }
 # de/serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 
 # date and time
 chrono = { version = "0.4", features = ["serde"] }
 
 # file system
 dirs = "5.0"
+
+# clipboard
+arboard = "3.4"
