@@ -43,7 +43,6 @@ impl History {
     pub fn save(&self) -> Result<()> {
         let history_path = Self::history_path()?;
 
-        // Create parent directory if it doesn't exist
         if let Some(parent) = history_path.parent() {
             fs::create_dir_all(parent)
                 .context(format!("Failed to create directory at {:?}", parent))?;
@@ -71,7 +70,6 @@ impl History {
 
         self.entries.push(entry);
 
-        // Keep only the last 10 entries
         if self.entries.len() > 10 {
             self.entries = self.entries.split_off(self.entries.len() - 10);
         }
@@ -94,6 +92,18 @@ impl History {
                 }
             })
             .collect()
+    }
+
+    pub fn clear() -> Result<()> {
+        let history_file = dirs::home_dir()
+            .context("Failed to get home directory")?
+            .join(".tai_history.json");
+
+        if history_file.exists() {
+            fs::remove_file(&history_file)?;
+        }
+
+        Ok(())
     }
 
     fn history_path() -> Result<PathBuf> {
