@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use spinoff::{spinners, Color, Spinner};
 
 use crate::chat_render::render_markdown_to_terminal;
-use crate::config::{find_context_files, load_config};
+use crate::config::{find_context_files, load_config, select_effective_provider};
 use crate::history::History;
 use crate::tools::ToolsRegistry;
 
@@ -128,71 +128,61 @@ pub struct Session<'a> {
 }
 
 pub fn setup(tools: &ToolsRegistry) -> Result<Box<dyn LLMProvider>> {
-    let config = load_config().unwrap_or_default();
+    let cfg = load_config().unwrap_or_default();
+    let eff = select_effective_provider(&cfg);
 
     let builder = LLMBuilder::new()
-        .max_tokens(config.max_tokens.unwrap_or(1500))
-        .temperature(config.temperature.unwrap_or(0.0))
+        .max_tokens(eff.max_tokens)
+        .temperature(eff.temperature)
         .stream(false);
     let builder = tools.apply_to_builder(builder);
 
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !key.is_empty() {
-            return builder
+    match eff.name.as_str() {
+        "anthropic" => {
+            let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+            builder
                 .backend(LLMBackend::Anthropic)
                 .api_key(key)
-                .model(
-                    config
-                        .model
-                        .as_deref()
-                        .unwrap_or("claude-3-5-sonnet-latest"),
-                )
+                .model(&eff.model)
                 .build()
-                .context("Failed to build Anthropic Client");
+                .context("Failed to build Anthropic Client")
         }
-    } else if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        if !key.is_empty() {
+        "openai" => {
+            let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
             let mut b = builder
                 .backend(LLMBackend::OpenAI)
                 .api_key(key)
-                .model(config.model.as_deref().unwrap_or("gpt-4o-mini"));
-            if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
-                if !base.is_empty() {
-                    b = b.base_url(base);
-                }
+                .model(&eff.model);
+            if let Some(base) = eff.base_url_or_host.clone() {
+                b = b.base_url(base);
             }
-            return b.build().context("Failed to build OpenAI Client");
+            b.build().context("Failed to build OpenAI Client")
         }
-    }
-
-    if let Ok(base) = std::env::var("OLLAMA_BASE_URL") {
-        if !base.is_empty() {
-            return builder
-                .backend(LLMBackend::Ollama)
-                .base_url(base)
-                .model(config.model.as_deref().unwrap_or("deepseek-r1:8b"))
-                .build()
-                .context("Failed to build Ollama Client");
+        "ollama" => {
+            let mut b = builder.backend(LLMBackend::Ollama).model(&eff.model);
+            if let Some(host) = eff.base_url_or_host.clone() {
+                b = b.base_url(host);
+            }
+            b.build().context("Failed to build Ollama Client")
         }
-    }
-
-    if let Ok(base) = std::env::var("LM_STUDIO_BASE_URL") {
-        if !base.is_empty() {
-            return builder
+        "lmstudio" => {
+            let key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "lm-studio".into());
+            let mut b = builder
                 .backend(LLMBackend::OpenAI)
-                .api_key(std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "lm-studio".into()))
-                .base_url(base)
-                .model(config.model.as_deref().unwrap_or("gpt-4o-mini"))
-                .build()
-                .context("Failed to build LM Studio (OpenAI compat) Client");
+                .api_key(key)
+                .model(&eff.model);
+            if let Some(base) = eff.base_url_or_host.clone() {
+                b = b.base_url(base);
+            }
+            b.build()
+                .context("Failed to build LM Studio (OpenAI compat) Client")
         }
+        _ => builder
+            .backend(LLMBackend::Ollama)
+            .model(&eff.model)
+            .build()
+            .context("Failed to build Ollama Client"),
     }
-
-    builder
-        .backend(LLMBackend::Ollama)
-        .model(config.model.as_deref().unwrap_or("deepseek-r1:8b"))
-        .build()
-        .context("Failed to build Ollama Client")
 }
 
 impl<'a> Session<'a> {
@@ -380,7 +370,10 @@ System rules:
 
 pub async fn run_chat(nocontext: bool, context: Option<String>, user_input: String) -> Result<()> {
     let tools = ToolsRegistry::with_default();
+    let cfg = load_config().unwrap_or_default();
+    let eff = select_effective_provider(&cfg);
     let llm = setup(&tools)?;
+    println!("Using provider {} (model: {})", eff.name, eff.model);
     let mut session = Session::new(llm.as_ref(), tools);
 
     let contexts = if nocontext {
