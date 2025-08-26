@@ -1510,7 +1510,6 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -1561,18 +1560,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rllm"
-version = "1.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0312b82124eef543ed04d396dffb7798ee6cdcc9151dd10ea1fe0839438e6f3d"
-dependencies = [
- "llm",
- "reqwest",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1978,7 +1965,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "futures",
- "rllm",
+ "llm",
  "serde",
  "serde_json",
  "spinoff",

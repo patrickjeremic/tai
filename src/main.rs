@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use arboard::Clipboard;
+
 use clap::{Parser, Subcommand};
-use futures::future::{BoxFuture, FutureExt};
-use rllm::{
+use futures::future::{FutureExt, LocalBoxFuture};
+use llm::{
     builder::{LLMBackend, LLMBuilder},
     chat::{ChatMessage, ChatRole, MessageType},
     LLMProvider,
@@ -14,6 +14,9 @@ use std::path::PathBuf;
 
 mod history;
 use history::History;
+
+mod tools;
+use tools::ToolsRegistry;
 
 #[derive(Parser)]
 #[command(name = "tai")]
@@ -68,15 +71,9 @@ struct Config {
     global_contexts: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct Response {
-    pub r#type: String,
-    pub result: String,
-    pub r#continue: bool,
-}
-
 pub struct Session<'a> {
-    llm: &'a Box<dyn LLMProvider>,
+    llm: &'a dyn LLMProvider,
+    tools: ToolsRegistry,
     history: Vec<ChatMessage>,
     file_history: History,
     context_added: bool,
@@ -228,35 +225,69 @@ fn find_context_files(context_name: Option<&str>) -> Result<Vec<(String, String)
     Ok(contexts)
 }
 
-fn setup() -> Result<Box<dyn LLMProvider>> {
+fn setup(tools: &ToolsRegistry) -> Result<Box<dyn LLMProvider>> {
     let config = load_config().unwrap_or_default();
 
     let builder = LLMBuilder::new()
         .max_tokens(config.max_tokens.unwrap_or(1500))
         .temperature(config.temperature.unwrap_or(0.0))
         .stream(false);
+    let builder = tools.apply_to_builder(builder);
 
-    // Try environment variable first, then config
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|key| !key.is_empty())
-        .or(config.anthropic_api_key);
-
-    if let Some(key) = api_key {
-        return builder
-            .backend(LLMBackend::Anthropic)
-            .api_key(key)
-            .model(
-                config
-                    .model
-                    .as_deref()
-                    .unwrap_or("claude-3-5-sonnet-latest"),
-            )
-            .build()
-            .context("Failed to build Anthropic Client");
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !key.is_empty() {
+            return builder
+                .backend(LLMBackend::Anthropic)
+                .api_key(key)
+                .model(
+                    config
+                        .model
+                        .as_deref()
+                        .unwrap_or("claude-3-5-sonnet-latest"),
+                )
+                .build()
+                .context("Failed to build Anthropic Client");
+        }
+    } else if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        if !key.is_empty() {
+            let mut b = builder
+                .backend(LLMBackend::OpenAI)
+                .api_key(key)
+                .model(config.model.as_deref().unwrap_or("gpt-4o-mini"));
+            if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
+                if !base.is_empty() {
+                    b = b.base_url(base);
+                }
+            }
+            return b.build().context("Failed to build OpenAI Client");
+        }
     }
 
-    // fallback to ollama using deepseek-r1
+    if let Ok(base) = std::env::var("OLLAMA_BASE_URL") {
+        if !base.is_empty() {
+            return builder
+                .backend(LLMBackend::Ollama)
+                .base_url(base)
+                .model(config.model.as_deref().unwrap_or("deepseek-r1:8b"))
+                .build()
+                .context("Failed to build Ollama Client");
+        }
+    }
+
+    // LM Studio support via OpenAI-compatible endpoint
+    if let Ok(base) = std::env::var("LM_STUDIO_BASE_URL") {
+        if !base.is_empty() {
+            return builder
+                .backend(LLMBackend::OpenAI)
+                .api_key(std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "lm-studio".into()))
+                .base_url(base)
+                .model(config.model.as_deref().unwrap_or("gpt-4o-mini"))
+                .build()
+                .context("Failed to build LM Studio (OpenAI compat) Client");
+        }
+    }
+
+    // fallback to local Ollama defaults
     builder
         .backend(LLMBackend::Ollama)
         .model(config.model.as_deref().unwrap_or("deepseek-r1:8b"))
@@ -434,8 +465,9 @@ async fn main() -> Result<()> {
         cli.message.join(" ")
     };
 
-    let llm = setup()?;
-    let mut session = Session::new(&llm);
+    let tools = ToolsRegistry::with_default();
+    let llm = setup(&tools)?;
+    let mut session = Session::new(llm.as_ref(), tools);
 
     // Load context files if not disabled
     let contexts = if cli.nocontext {
@@ -458,11 +490,12 @@ async fn main() -> Result<()> {
 }
 
 impl<'a> Session<'a> {
-    pub fn new(llm: &'a Box<dyn LLMProvider>) -> Self {
+    pub fn new(llm: &'a dyn LLMProvider, tools: ToolsRegistry) -> Self {
         let file_history = History::load().unwrap_or_default();
 
         Self {
             llm,
+            tools,
             history: Vec::new(),
             file_history,
             context_added: false,
@@ -473,50 +506,107 @@ impl<'a> Session<'a> {
         &'b mut self,
         input: &'b str,
         contexts: &'b [(String, String)],
-    ) -> BoxFuture<'b, Result<()>> {
+    ) -> LocalBoxFuture<'b, Result<()>> {
         async move {
             let mut spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
 
-            // Build the prompt with history context
-            let prompt = self.build_prompt(input, contexts);
+            if self.history.is_empty() {
+                let system_prompt = self.build_system_prompt(contexts);
+                self.history.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    message_type: MessageType::Text,
+                    content: system_prompt,
+                });
+            }
 
             self.history.push(ChatMessage {
                 role: ChatRole::User,
                 message_type: MessageType::Text,
-                content: prompt,
+                content: input.to_string(),
             });
 
-            let text = self
-                .llm
-                .chat(&self.history)
-                .await
-                .context("Chat failed")?
-                .to_string();
-            self.history.push(ChatMessage {
-                role: ChatRole::Assistant,
-                message_type: MessageType::Text,
-                content: text.clone(),
-            });
+            loop {
+                let response = self
+                    .llm
+                    .chat_with_tools(&self.history, self.llm.tools())
+                    .await
+                    .context("Chat failed")?;
 
-            // Save to history file
-            self.file_history
-                .add_entry(input.to_string(), text.clone())?;
+                if let Some(calls) = response.tool_calls() {
+                    if !calls.is_empty() {
+                        // Stop/clear spinner before interactive tool handling
+                        spinner.clear();
 
-            let result: Response =
-                serde_json::from_str(&text).context("Failed to parse response")?;
+                        self.history.push(
+                            ChatMessage::assistant()
+                                .tool_use(calls.clone())
+                                .content("")
+                                .build(),
+                        );
 
-            spinner.clear();
+                        let mut tool_results = Vec::new();
+                        for call in &calls {
+                            match self.tools.handle_tool_call(call) {
+                                Ok(result) => {
+                                    tool_results.push(llm::ToolCall {
+                                        id: call.id.clone(),
+                                        call_type: "function".to_string(),
+                                        function: llm::FunctionCall {
+                                            name: call.function.name.clone(),
+                                            arguments: serde_json::to_string(&result)
+                                                .unwrap_or("{}".into()),
+                                        },
+                                    });
+                                }
+                                Err(e) => {
+                                    tool_results.push(llm::ToolCall {
+                                        id: call.id.clone(),
+                                        call_type: "function".to_string(),
+                                        function: llm::FunctionCall {
+                                            name: call.function.name.clone(),
+                                            arguments: serde_json::to_string(
+                                                &serde_json::json!({"error": e.to_string()}),
+                                            )
+                                            .unwrap_or("{}".into()),
+                                        },
+                                    });
+                                }
+                            }
+                        }
 
-            match result.r#type.as_str() {
-                "command" => self.handle_command(&result).await,
-                "answer" => self.handle_answer(&result),
-                _ => anyhow::bail!("Unknown response type: {}", result.r#type),
+                        self.history.push(
+                            ChatMessage::user()
+                                .tool_result(tool_results)
+                                .content("")
+                                .build(),
+                        );
+
+                        self.history.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            message_type: MessageType::Text,
+                            content: "The user already saw the exact command output in their terminal. Do not summarize it. If another action is needed, call a tool. If nothing else is needed, reply only with: OK".to_string(),
+                        });
+
+                        // Restart spinner for the next LLM step
+                        spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
+                        continue;
+                    }
+                }
+
+                spinner.clear();
+
+                let text = response.text().unwrap_or_else(|| response.to_string());
+                self.file_history
+                    .add_entry(input.to_string(), text.clone())?;
+                println!("{}", text);
+                break;
             }
+            Ok(())
         }
-        .boxed()
+        .boxed_local()
     }
 
-    fn build_prompt(&mut self, input: &str, contexts: &[(String, String)]) -> String {
+    fn build_system_prompt(&mut self, contexts: &[(String, String)]) -> String {
         let relevant_entries = self.file_history.get_relevant_entries();
 
         let mut history_context = String::new();
@@ -535,7 +625,6 @@ impl<'a> Session<'a> {
             }
         }
 
-        // Add context files only to the first message
         let mut context_section = String::new();
         if !contexts.is_empty() && !self.context_added {
             context_section.push_str("\n## Additional Context\n\n");
@@ -546,143 +635,19 @@ impl<'a> Session<'a> {
         }
 
         format!(
-            r#"You are an ai assistant that is running on the terminal.
-Your goal is to assist the user in reaching his goal.
+            r#"You are an AI assistant running in a terminal that can call tools to operate on the user's machine.
+Your goal is to help the user achieve their task efficiently and safely.
 
-These are the rules that you have to obey:
-- If the user is asking a question about a specific terminal command, give a very brief example of the command and explain each parameter.
-- If the user is asking you (imperatively) to do something, just write down the exact command and nothing else. Only output the exact command to execute the given task without any explanation whatsoever.
+System rules:
+- If the user asks you to perform a terminal task, call the run_shell tool with the exact command to execute. Prefer pipes over multiple sequential commands when possible.
+- Keep commands non-interactive, idempotent, and safe by default. Avoid destructive operations unless the user explicitly requests them.
+- When executing a terminal command the user can already see the output of the command. Do NOT summarize or restate the command's output.
+- If the user is asking about a command (explanatory), answer concisely and include a one-line example, then a brief explanation of key flags.
+- After running a command via the tool, use its output to decide next steps. You may call tools multiple times until the task is complete.
+- Do not invent file paths or secrets. Never print sensitive values.
 
-The response must be a valid json and only a json. The format of the json has to be:
-{{
-    "type": "command",
-    "result": "curl -I https://google.com",
-    "continue": false,
-}}
-
-The "type" can either be "command" (to execute a command) or an "answer".
-The "result" is the actual command or answer.
-
-- If the "result" is a "command" and you need it's output to continue to solve the given task respond with "continue" set to true.
-- If this is the last command of the chain respond with "continue" set to false.
-- If the result can be achieved by piping don't use "continue" but provide the command with pipes directly - be extra cautious when using case-sensitive grep.
-- If you need to provide an answer that contains an example command without actual proper parameters still use the "type" "answer".
-{context_section}{history_context}
-The user asks:
-{input}"#
+{context_section}{history_context}"#
         )
-    }
-
-    fn handle_command<'b>(&'b mut self, response: &'b Response) -> BoxFuture<'b, Result<()>> {
-        async move {
-            println!("> {}", response.result);
-            print!("Do you want to execute this command? [Y/n/c] ");
-            std::io::Write::flush(&mut std::io::stdout()).context("Failed to flush stdout")?;
-
-            let mut input = String::new();
-            std::io::stdin()
-                .read_line(&mut input)
-                .context("Failed to read user input")?;
-
-            let choice = input.trim().to_lowercase();
-
-            if choice == "c" {
-                // Copy to clipboard
-                match Clipboard::new() {
-                    Ok(mut clipboard) => {
-                        if let Err(e) = clipboard.set_text(&response.result) {
-                            eprintln!("Failed to copy to clipboard: {}", e);
-                        } else {
-                            println!("Command copied to clipboard");
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to access clipboard: {}", e);
-                    }
-                }
-                return Ok(());
-            }
-
-            if choice == "n" {
-                println!("Command execution cancelled");
-                return Ok(());
-            }
-
-            print!("\x1B[1A\x1B[2K\r"); // Move up 1 line and clear it
-            print!("\x1B[2K\r"); // Clear current line
-
-            let mut spinner = Spinner::new(spinners::Dots, "Executing...", Color::Blue);
-            let mut spinning = true;
-
-            // Check if command contains sudo and clear spinner immediately
-            // This ensures password input will work
-            let contains_sudo = response.result.contains("sudo ");
-            if contains_sudo && !cfg!(target_os = "windows") {
-                spinner.clear();
-                spinning = false;
-            }
-
-            let output = if cfg!(target_os = "windows") {
-                std::process::Command::new("cmd")
-                    .args(["/C", &response.result])
-                    .output()
-            } else {
-                std::process::Command::new("sh")
-                    .args(["-c", &response.result])
-                    .output()
-            }
-            .context("Failed to execute command")?;
-
-            // Combine stdout and stderr
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            // Create combined output
-            let combined_output = if stderr.is_empty() {
-                stdout.to_string()
-            } else if stdout.is_empty() {
-                stderr.to_string()
-            } else {
-                format!("{}\n{}", stdout, stderr)
-            };
-
-            if spinning {
-                spinner.clear();
-            }
-
-            // Print combined output regardless of success
-            println!("{}", combined_output.trim_end());
-
-            // If command failed, show a warning but continue
-            if !output.status.success() {
-                eprintln!(
-                    "Note: Command exited with non-zero status: {}",
-                    output.status
-                );
-            }
-
-            if response.r#continue {
-                return self
-                    .step(
-                        &format!(
-                            r#"The output of {} is:
-
-{}"#,
-                            response.result, stdout
-                        ),
-                        &[],
-                    )
-                    .await;
-            }
-
-            Ok(())
-        }
-        .boxed()
-    }
-
-    fn handle_answer(&mut self, response: &Response) -> Result<()> {
-        println!("{}", response.result);
-        Ok(())
     }
 }
 
