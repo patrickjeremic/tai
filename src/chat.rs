@@ -6,6 +6,8 @@ use llm::{
     LLMProvider,
 };
 use spinoff::{spinners, Color, Spinner};
+use nu_ansi_term::{Color as NuColor, Style};
+use serde_json::Value as JsonValue;
 
 use crate::chat_render::render_markdown_to_terminal;
 use crate::config::{find_context_files, load_config};
@@ -144,6 +146,21 @@ impl<'a> Session<'a> {
 
                         let mut tool_results = Vec::new();
                         for call in &calls {
+                            let name = &call.function.name;
+                            let args_raw = &call.function.arguments;
+                            let pretty_args = serde_json::from_str::<JsonValue>(args_raw)
+                                .ok()
+                                .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                                .unwrap_or_else(|| args_raw.clone());
+                            let header = Style::new()
+                                .bold()
+                                .fg(NuColor::LightCyan)
+                                .paint("Tool call");
+                            let name_col = Style::new().bold().fg(NuColor::Yellow).paint(name);
+                            println!("{}: {}", header, name_col);
+                            let args_label = Style::new().fg(NuColor::Green).paint("params");
+                            println!("{}:\n{}", args_label, pretty_args);
+
                             match self.tools.handle_tool_call(call) {
                                 Ok(result) => {
                                     tool_results.push(llm::ToolCall {
@@ -179,11 +196,20 @@ impl<'a> Session<'a> {
                                 .build(),
                         );
 
-                        self.history.push(ChatMessage {
-                            role: ChatRole::Assistant,
-                            message_type: MessageType::Text,
-                            content: "The user already saw the exact command output in their terminal. Do not summarize it. If another action is needed, call a tool. If nothing else is needed, reply only with: OK".to_string(),
-                        });
+                        let has_shell = calls.iter().any(|c| c.function.name == "run_shell");
+                        if has_shell {
+                            self.history.push(ChatMessage {
+                                role: ChatRole::Assistant,
+                                message_type: MessageType::Text,
+                                content: "Summarize the results of the terminal command succinctly and proceed with any next steps to complete the user's request. If the command output already satisfies the request, provide the final answer concisely.".to_string(),
+                            });
+                        } else {
+                            self.history.push(ChatMessage {
+                                role: ChatRole::Assistant,
+                                message_type: MessageType::Text,
+                                content: "Use the tool outputs above to answer the user directly. Provide a concise summary or the requested information. If more actions are needed, call a tool.".to_string(),
+                            });
+                        }
 
                         spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
                         continue;

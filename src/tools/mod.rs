@@ -919,12 +919,6 @@ impl Tool for ShellCommandTool {
                 } else {
                     format!("{}\n{}", stdout, stderr)
                 };
-                if !status.success() {
-                    eprintln!("Note: Command exited with non-zero status: {}", status);
-                }
-                if !combined.is_empty() {
-                    println!("{}", combined);
-                }
                 Ok(json!({
                     "command": command,
                     "executed": true,
