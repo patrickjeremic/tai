@@ -5,14 +5,119 @@ use llm::{
     chat::{ChatMessage, ChatRole, MessageType},
     LLMProvider,
 };
-use spinoff::{spinners, Color, Spinner};
 use nu_ansi_term::{Color as NuColor, Style};
 use serde_json::Value as JsonValue;
+use spinoff::{spinners, Color, Spinner};
 
 use crate::chat_render::render_markdown_to_terminal;
 use crate::config::{find_context_files, load_config};
 use crate::history::History;
 use crate::tools::ToolsRegistry;
+
+fn is_sensitive_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    let hints = [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "auth",
+        "authorization",
+        "cookie",
+        "api_key",
+        "apikey",
+        "access_key",
+        "session",
+        "bearer",
+    ];
+    hints.iter().any(|h| k.contains(h))
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut out = s.chars().take(max).collect::<String>();
+        out.push('…');
+        out
+    }
+}
+
+fn render_value_for_kv(key: &str, v: &JsonValue) -> String {
+    if is_sensitive_key(key) {
+        return "***".to_string();
+    }
+    match v {
+        JsonValue::String(s) => truncate_str(s, 160),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Array(arr) => {
+            if arr.is_empty() {
+                "[]".to_string()
+            } else if arr.len() <= 5
+                && arr
+                    .iter()
+                    .all(|it| it.is_string() || it.is_number() || it.is_boolean() || it.is_null())
+            {
+                let parts: Vec<String> = arr
+                    .iter()
+                    .map(|it| match it {
+                        JsonValue::String(s) => format!("\"{}\"", truncate_str(s, 60)),
+                        JsonValue::Number(n) => n.to_string(),
+                        JsonValue::Bool(b) => b.to_string(),
+                        JsonValue::Null => "null".to_string(),
+                        _ => "…".to_string(),
+                    })
+                    .collect();
+                format!("[{}]", parts.join(", "))
+            } else {
+                format!("[{} items]", arr.len())
+            }
+        }
+        JsonValue::Object(obj) => {
+            format!("{{{} keys}}", obj.len())
+        }
+    }
+}
+
+fn format_tool_params(args_raw: &str) -> String {
+    let parsed = serde_json::from_str::<JsonValue>(args_raw);
+    match parsed {
+        Ok(JsonValue::Object(map)) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let key_style = Style::new().bold().fg(NuColor::LightGreen);
+            let mut out = String::new();
+            for k in keys {
+                let v = &map[k];
+                match v {
+                    JsonValue::Object(nested) => {
+                        let header = key_style.paint(k.as_str()).to_string();
+                        out.push_str(&format!("  {}:\n", header));
+                        let mut sub_keys: Vec<&String> = nested.keys().collect();
+                        sub_keys.sort();
+                        for sk in sub_keys {
+                            let sv = &nested[sk];
+                            let sks = key_style.paint(sk.as_str()).to_string();
+                            let val = render_value_for_kv(sk, sv);
+                            out.push_str(&format!("    {}: {}\n", sks, val));
+                        }
+                    }
+                    _ => {
+                        let ks = key_style.paint(k.as_str()).to_string();
+                        let val = render_value_for_kv(k, v);
+                        out.push_str(&format!("  {}: {}\n", ks, val));
+                    }
+                }
+            }
+            out
+        }
+        Ok(other) => serde_json::to_string_pretty(&other).unwrap_or_else(|_| args_raw.to_string()),
+        Err(_) => args_raw.to_string(),
+    }
+}
 
 pub struct Session<'a> {
     llm: &'a dyn LLMProvider,
@@ -148,10 +253,7 @@ impl<'a> Session<'a> {
                         for call in &calls {
                             let name = &call.function.name;
                             let args_raw = &call.function.arguments;
-                            let pretty_args = serde_json::from_str::<JsonValue>(args_raw)
-                                .ok()
-                                .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                                .unwrap_or_else(|| args_raw.clone());
+                            let formatted = format_tool_params(args_raw);
                             let header = Style::new()
                                 .bold()
                                 .fg(NuColor::LightCyan)
@@ -159,7 +261,7 @@ impl<'a> Session<'a> {
                             let name_col = Style::new().bold().fg(NuColor::Yellow).paint(name);
                             println!("{}: {}", header, name_col);
                             let args_label = Style::new().fg(NuColor::Green).paint("params");
-                            println!("{}:\n{}", args_label, pretty_args);
+                            println!("{}:\n{}", args_label, formatted);
 
                             match self.tools.handle_tool_call(call) {
                                 Ok(result) => {
