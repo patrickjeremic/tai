@@ -961,7 +961,7 @@ impl Tool for FetchUrlTool {
                 .description("Optional request body for POST/PUT/PATCH"),
             ParamBuilder::new("timeout_sec")
                 .type_of("integer")
-                .description("Request timeout in seconds (default 20)"),
+                .description("Request timeout in seconds (default 10)"),
             ParamBuilder::new("max_bytes")
                 .type_of("integer")
                 .description("Maximum response bytes to capture (default 200000)"),
@@ -986,7 +986,7 @@ impl Tool for FetchUrlTool {
         let timeout = args
             .get("timeout_sec")
             .and_then(|v| v.as_u64())
-            .unwrap_or(20);
+            .unwrap_or(10);
         let max_bytes = args
             .get("max_bytes")
             .and_then(|v| v.as_u64())
@@ -1011,6 +1011,7 @@ impl Tool for FetchUrlTool {
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout))
+            .connect_timeout(Duration::from_secs(timeout))
             .build()?;
 
         let req_builder = match method.as_str() {
