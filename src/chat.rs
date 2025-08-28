@@ -362,6 +362,7 @@ System rules:
 - After running a command via the tool, use its output to decide next steps. You may call tools multiple times until the task is complete.
 - Do not invent file paths or secrets. Never print sensitive values.
 - When you include code, always use fenced code blocks with a language identifier like ```rust, ```bash, ```python, etc. Avoid plain triple backticks without a language.
+- Always respond using Markdown syntax.
 
 {context_section}{history_context}"#
         )
@@ -373,7 +374,15 @@ pub async fn run_chat(nocontext: bool, context: Option<String>, user_input: Stri
     let cfg = load_config().unwrap_or_default();
     let eff = select_effective_provider(&cfg);
     let llm = setup(&tools)?;
-    println!("Using provider {} (model: {})", eff.name, eff.model);
+    println!(
+        "Using provider {} (model: {}{})",
+        eff.name,
+        eff.model,
+        eff.base_url_or_host
+            .as_ref()
+            .map(|u| format!("; base: {}", u))
+            .unwrap_or_default()
+    );
     let mut session = Session::new(llm.as_ref(), tools);
 
     let contexts = if nocontext {

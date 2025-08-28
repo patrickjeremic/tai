@@ -51,7 +51,6 @@ pub struct ProviderCommon {
     pub max_tokens: Option<u32>,
 }
 
-
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct AnthropicConfig {
     #[serde(flatten)]
@@ -420,14 +419,32 @@ fn is_ollama_available(cfg: &Config) -> (bool, String) {
     (false, format!("server down at {}", host))
 }
 
+fn ensure_trailing_slash(s: String) -> String {
+    if s.ends_with('/') {
+        s
+    } else {
+        format!("{}/", s)
+    }
+}
+
+fn ensure_v1_base(base: String) -> String {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        format!("{}/", trimmed)
+    } else {
+        format!("{}/v1/", trimmed)
+    }
+}
+
 fn is_lmstudio_available(cfg: &Config) -> (bool, String) {
-    let base = cfg
+    let raw_base = cfg
         .providers
         .lmstudio
         .base_url
         .clone()
         .or_else(|| std::env::var("LM_STUDIO_BASE_URL").ok())
-        .unwrap_or_else(|| "http://127.0.0.1:1234/v1".to_string());
+        .unwrap_or_else(|| "http://127.0.0.1:1234/v1/".to_string());
+    let base = ensure_v1_base(raw_base);
     let url = format!("{}/models", base.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(500))
@@ -526,7 +543,8 @@ fn build_effective(name: &str, cfg: &Config) -> Option<EffectiveProvider> {
                 .openai
                 .base_url
                 .clone()
-                .or_else(|| std::env::var("OPENAI_BASE_URL").ok()),
+                .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+                .map(ensure_trailing_slash),
         }),
         "ollama" => Some(EffectiveProvider {
             name: "ollama".into(),
@@ -558,13 +576,14 @@ fn build_effective(name: &str, cfg: &Config) -> Option<EffectiveProvider> {
                 .unwrap_or_else(|| "gpt-4o-mini".into()),
             temperature: cfg.providers.lmstudio.common.temperature.unwrap_or(0.0),
             max_tokens: cfg.providers.lmstudio.common.max_tokens.unwrap_or(1500),
-            base_url_or_host: cfg
-                .providers
-                .lmstudio
-                .base_url
-                .clone()
-                .or_else(|| std::env::var("LM_STUDIO_BASE_URL").ok())
-                .or_else(|| Some("http://127.0.0.1:1234/v1".into())),
+            base_url_or_host: Some(ensure_v1_base(
+                cfg.providers
+                    .lmstudio
+                    .base_url
+                    .clone()
+                    .or_else(|| std::env::var("LM_STUDIO_BASE_URL").ok())
+                    .unwrap_or_else(|| "http://127.0.0.1:1234/v1/".to_string()),
+            )),
         }),
         _ => None,
     }
@@ -739,7 +758,6 @@ pub fn handle_config_command(
     }
     Ok(())
 }
-
 
 pub fn handle_config_provider_list() -> Result<()> {
     let cfg = load_config()?;

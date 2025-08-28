@@ -158,8 +158,7 @@ struct LMStudioSettingsArgs {
     max_tokens: Option<u32>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(Commands::Config(cfg)) = &cli.command {
@@ -252,5 +251,6 @@ async fn main() -> Result<()> {
         cli.message.join(" ")
     };
 
-    chat::run_chat(cli.nocontext, cli.context, user_input).await
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(chat::run_chat(cli.nocontext, cli.context, user_input))
 }

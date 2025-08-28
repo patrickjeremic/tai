@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SynStyle, Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
@@ -59,13 +59,13 @@ pub fn render_markdown_to_terminal(input: &str) -> String {
                     }
                     _in_paragraph = true;
                 }
-                Tag::Heading(level, _, _) => {
+                Tag::Heading { level, .. } => {
                     heading_level = Some(level);
                     if !out.is_empty() {
                         out.push('\n');
                     }
                 }
-                Tag::BlockQuote => {
+                Tag::BlockQuote(_) => {
                     if !out.ends_with('\n') {
                         out.push('\n');
                     }
@@ -97,38 +97,39 @@ pub fn render_markdown_to_terminal(input: &str) -> String {
                 Tag::Emphasis
                 | Tag::Strong
                 | Tag::Strikethrough
-                | Tag::Link(_, _, _)
-                | Tag::Image(_, _, _)
+                | Tag::Link { .. }
+                | Tag::Image { .. }
                 | Tag::Table(_)
                 | Tag::TableHead
                 | Tag::TableRow
                 | Tag::TableCell
                 | Tag::FootnoteDefinition(_) => {}
+                _ => {}
             },
             Event::End(tag) => match tag {
-                Tag::Paragraph => {
+                TagEnd::Paragraph => {
                     _in_paragraph = false;
                     out.push('\n');
                     out.push('\n');
                 }
-                Tag::Heading(_, _, _) => {
+                TagEnd::Heading(_) => {
                     out.push('\n');
                     out.push('\n');
                     heading_level = None;
                 }
-                Tag::BlockQuote => {
+                TagEnd::BlockQuote(_) => {
                     out.push('\n');
                 }
-                Tag::List(_) => {
+                TagEnd::List(_) => {
                     out.push('\n');
                     let _ = list_stack.pop();
                 }
-                Tag::Item => {
+                TagEnd::Item => {
                     if !out.ends_with('\n') {
                         out.push('\n');
                     }
                 }
-                Tag::CodeBlock(_) => {
+                TagEnd::CodeBlock => {
                     let lang = in_code_block.take().unwrap_or_default();
                     let highlighted = highlight(
                         &code_buffer,
@@ -142,16 +143,17 @@ pub fn render_markdown_to_terminal(input: &str) -> String {
                     code_buffer.clear();
                     out.push('\n');
                 }
-                Tag::Emphasis
-                | Tag::Strong
-                | Tag::Strikethrough
-                | Tag::Link(_, _, _)
-                | Tag::Image(_, _, _)
-                | Tag::Table(_)
-                | Tag::TableHead
-                | Tag::TableRow
-                | Tag::TableCell
-                | Tag::FootnoteDefinition(_) => {}
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Image
+                | TagEnd::Table
+                | TagEnd::TableHead
+                | TagEnd::TableRow
+                | TagEnd::TableCell
+                | TagEnd::FootnoteDefinition => {}
+                _ => {}
             },
             Event::Text(text) => {
                 if in_code_block.is_some() {
@@ -174,6 +176,15 @@ pub fn render_markdown_to_terminal(input: &str) -> String {
             }
             Event::Html(html) => {
                 out.push_str(html.as_ref());
+            }
+            Event::InlineHtml(html) => {
+                out.push_str(html.as_ref());
+            }
+            Event::InlineMath(text) => {
+                out.push_str(text.as_ref());
+            }
+            Event::DisplayMath(text) => {
+                out.push_str(text.as_ref());
             }
             Event::SoftBreak => {
                 out.push('\n');
