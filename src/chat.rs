@@ -131,10 +131,13 @@ pub fn setup(tools: &ToolsRegistry) -> Result<Box<dyn LLMProvider>> {
     let cfg = load_config().unwrap_or_default();
     let eff = select_effective_provider(&cfg);
 
-    let builder = LLMBuilder::new()
-        .max_tokens(eff.max_tokens)
-        .temperature(eff.temperature)
+    let mut builder = LLMBuilder::new()
         .stream(false);
+    let is_openai_gpt5 = eff.name == "openai" && (eff.model.starts_with("gpt-5") || eff.model.starts_with("gpt-5-"));
+    if !is_openai_gpt5 {
+        builder = builder.temperature(eff.temperature);
+        builder = builder.max_tokens(eff.max_tokens);
+    }
     let builder = tools.apply_to_builder(builder);
 
     match eff.name.as_str() {
