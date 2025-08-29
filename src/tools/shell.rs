@@ -14,16 +14,27 @@ impl Tool for ShellCommandTool {
         "run_shell"
     }
     fn description(&self) -> &'static str {
-        "Execute a shell command on the user's machine. The user can see the command output! Use for tasks that require terminal operations. Always prefer safe, idempotent commands and avoid destructive operations."
+        #[cfg(target_os = "windows")]
+        return "Execute a Windows cmd command on the user's machine. The machine runs Windows. The user can see the command output! Use for tasks that require terminal operations. Always prefer safe, idempotent commands and avoid destructive operations.";
+        #[cfg(target_os = "linux")]
+        return "Execute a Linux shell command on the user's machine. The machine runs Linux. The user can see the command output! Use for tasks that require terminal operations. Always prefer safe, idempotent commands and avoid destructive operations.";
+        #[cfg(target_os = "macos")]
+        return "Execute a Mac OS shell command on the user's machine. The machine runs Mac OS. The user can see the command output! Use for tasks that require terminal operations. Always prefer safe, idempotent commands and avoid destructive operations.";
     }
     fn required_params(&self) -> &'static [&'static str] {
         &["command"]
     }
     fn params(&self) -> Vec<ParamBuilder> {
+        #[cfg(target_os = "windows")]
+        let shell = "Using `cmd /C`";
+        #[cfg(target_os = "linux")]
+        let shell = "Using `sh -c`";
+        #[cfg(target_os = "macos")]
+        let shell = "Using `sh -c`";
         vec![
-            ParamBuilder::new("command").type_of("string").description(
-                "The exact shell command to execute (sh -c on Unix, cmd /C on Windows)",
-            ),
+            ParamBuilder::new("command")
+                .type_of("string")
+                .description(format!("The exact shell command to execute ({shell})")),
             ParamBuilder::new("timeout_sec")
                 .type_of("integer")
                 .description("Optional timeout in seconds (defaults to 120)"),
@@ -40,7 +51,7 @@ impl Tool for ShellCommandTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(120);
 
-        println!("> {}", command);
+        // println!("> {}", command);
         print!("Do you want to execute this command? [Y/n/c] ");
         std::io::Write::flush(&mut std::io::stdout()).context("Failed to flush stdout")?;
         let mut input = String::new();
@@ -105,6 +116,8 @@ impl Tool for ShellCommandTool {
             std::thread::sleep(Duration::from_millis(50));
         };
 
+        // TODO: make this a textbox as well (like for regular output) but increase size a bit and
+        // do not clear it after it finished.
         match status_output {
             Ok((status, output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();

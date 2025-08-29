@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
+use bat::{PagingMode, PrettyPrinter, WrappingMode};
 use futures::future::{FutureExt, LocalBoxFuture};
+use futures::StreamExt;
 use llm::{
     builder::{LLMBackend, LLMBuilder},
-    chat::{ChatMessage, ChatRole, MessageType},
+    chat::{ChatMessage, ChatRole, MessageType, StreamResponse},
     LLMProvider,
 };
 use nu_ansi_term::{Color as NuColor, Style};
 use serde_json::Value as JsonValue;
-use spinoff::{spinners, Color, Spinner};
+use std::io::Write;
+use terminal_size::{terminal_size, Width};
 
-use crate::chat_render::render_markdown_to_terminal;
+
 use crate::config::{find_context_files, load_config, select_effective_provider};
 use crate::history::History;
 use crate::tools::ToolsRegistry;
@@ -127,13 +130,15 @@ pub struct Session<'a> {
     context_added: bool,
 }
 
+
+
 pub fn setup(tools: &ToolsRegistry) -> Result<Box<dyn LLMProvider>> {
     let cfg = load_config().unwrap_or_default();
     let eff = select_effective_provider(&cfg);
 
-    let mut builder = LLMBuilder::new()
-        .stream(false);
-    let is_openai_gpt5 = eff.name == "openai" && (eff.model.starts_with("gpt-5") || eff.model.starts_with("gpt-5-"));
+    let mut builder = LLMBuilder::new().stream(true);
+    let is_openai_gpt5 =
+        eff.name == "openai" && (eff.model.starts_with("gpt-5") || eff.model.starts_with("gpt-5-"));
     if !is_openai_gpt5 {
         builder = builder.temperature(eff.temperature);
         builder = builder.max_tokens(eff.max_tokens);
@@ -207,7 +212,6 @@ impl<'a> Session<'a> {
         contexts: &'b [(String, String)],
     ) -> LocalBoxFuture<'b, Result<()>> {
         async move {
-            let mut spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
 
             if self.history.is_empty() {
                 let system_prompt = self.build_system_prompt(contexts);
@@ -233,7 +237,6 @@ impl<'a> Session<'a> {
 
                 if let Some(calls) = response.tool_calls() {
                     if !calls.is_empty() {
-                        spinner.clear();
 
                         self.history.push(
                             ChatMessage::assistant()
@@ -258,6 +261,32 @@ impl<'a> Session<'a> {
 
                             match self.tools.handle_tool_call(call) {
                                 Ok(result) => {
+                                    let result_label = Style::new().fg(NuColor::LightMagenta).paint("result");
+                                    if name == "run_shell" {
+                                        let executed = result.get("executed").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        let copied = result.get("copied").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        if copied {
+                                            println!("{}: command copied to clipboard", result_label);
+                                        } else if executed {
+                                            let output = result.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                                            if !output.is_empty() {
+                                                println!("{}:\n{}", result_label, output);
+                                            } else {
+                                                let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+                                                let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                                                if !stdout.is_empty() { println!("{} (stdout):\n{}", result_label, stdout); }
+                                                if !stderr.is_empty() { println!("{} (stderr):\n{}", result_label, stderr); }
+                                            }
+                                        } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+                                            println!("{}: {}", result_label, err);
+                                        } else {
+                                            println!("{}: command not executed", result_label);
+                                        }
+                                    } else {
+                                        let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into());
+                                        println!("{}:\n{}", result_label, pretty);
+                                    }
+
                                     tool_results.push(llm::ToolCall {
                                         id: call.id.clone(),
                                         call_type: "function".to_string(),
@@ -269,6 +298,9 @@ impl<'a> Session<'a> {
                                     });
                                 }
                                 Err(e) => {
+                                    let result_label = Style::new().fg(NuColor::LightMagenta).paint("result");
+                                    println!("{}: {}", result_label, e);
+
                                     tool_results.push(llm::ToolCall {
                                         id: call.id.clone(),
                                         call_type: "function".to_string(),
@@ -306,18 +338,102 @@ impl<'a> Session<'a> {
                             });
                         }
 
-                        spinner = Spinner::new(spinners::Dots, "Thinking...", Color::Blue);
                         continue;
                     }
                 }
 
-                spinner.clear();
 
-                let text = response.text().unwrap_or_else(|| response.to_string());
-                let rendered = render_markdown_to_terminal(&text);
+                let text = {
+                    let mut buf = String::new();
+                    let darker_style = Style::new().fg(NuColor::Rgb(160, 160, 160));
+                    
+                    // Flush any pending output before starting streaming
+                    std::io::stdout().flush().ok();
+                    std::io::stderr().flush().ok();
+                    
+                    // Display bat-style separator line
+                    let sz = terminal_size();
+                    let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
+                    let separator = "─".repeat(term_cols);
+                    let separator_style = Style::new().fg(NuColor::Rgb(100, 100, 100));
+                    println!("{}", separator_style.paint(&separator));
+                    std::io::stdout().flush().ok();
+                    
+                    match self.llm.chat_stream_struct(&self.history).await {
+                        Ok(mut stream) => {
+                            while let Some(chunk) = stream.next().await {
+                                match chunk {
+                                    Ok(StreamResponse { choices, .. }) => {
+                                        if let Some(delta) = choices.first().map(|c| &c.delta) {
+                                            if let Some(content) = &delta.content {
+                                                buf.push_str(content);
+                                                print!("{}", darker_style.paint(content));
+                                                std::io::stdout().flush().ok();
+                                            }
+                                        }
+                                    }
+                                    Err(_e) => {
+                                        // Silently continue - errors might be normal for some providers
+                                    }
+                                }
+                            }
+                            buf
+                        }
+                        Err(_e) => {
+                            // Fallback to simple string streaming
+                            match self.llm.chat_stream(&self.history).await {
+                                Ok(mut stream) => {
+                                    while let Some(delta) = stream.next().await {
+                                        if let Ok(token) = delta {
+                                            buf.push_str(&token);
+                                            print!("{}", darker_style.paint(&token));
+                                            std::io::stdout().flush().ok();
+                                        }
+                                    }
+                                    buf
+                                }
+                                Err(_e2) => {
+                                    eprintln!("Error: streaming failed");
+                                    String::new()
+                                }
+                            }
+                        }
+                    }
+                };
+                
+                println!(); // Add newline after streaming
+
                 self.file_history
                     .add_entry(input.to_string(), text.clone())?;
-                println!("{}", rendered);
+
+                let sz = terminal_size();
+                let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
+
+                {
+                    // Clear the streamed output and separator line
+                    let line_count = text.lines().count() + 2; // +1 for newline, +1 for separator
+                    print!("\x1b[{}A\x1b[G", line_count);
+                    if line_count > 0 {
+                        print!("\x1b[{}M", line_count);
+                    }
+                    std::io::stdout().flush().ok();
+                    
+                    let mut printer = PrettyPrinter::new();
+                    printer
+                        .input_from_bytes(text.as_bytes())
+                        .language("markdown")
+                        .wrapping_mode(WrappingMode::Character)
+                        .paging_mode(PagingMode::Never)
+                        .term_width(term_cols)
+                        .use_italics(true)
+                        .grid(true)
+                        .line_numbers(false)
+                        .header(false)
+                        .theme("1337");
+
+                    let _ = printer.print();
+                }
+
                 break;
             }
             Ok(())
@@ -353,6 +469,12 @@ impl<'a> Session<'a> {
             self.context_added = true;
         }
 
+        #[cfg(target_os = "windows")]
+        let os = "Windows";
+        #[cfg(target_os = "linux")]
+        let os = "Linux";
+        #[cfg(target_os = "macos")]
+        let os = "Mac OS";
         format!(
             r#"You are an AI assistant running in a terminal that can call tools to operate on the user's machine.
 Your goal is to help the user achieve their task efficiently and safely.
@@ -360,6 +482,7 @@ Your goal is to help the user achieve their task efficiently and safely.
 System rules:
 - If the user asks you to perform a terminal task, call the run_shell tool with the exact command to execute. Prefer pipes over multiple sequential commands when possible.
 - Keep commands non-interactive, idempotent, and safe by default. Avoid destructive operations unless the user explicitly requests them.
+- The commands are being executed on {os}.
 - When executing a terminal command the user can already see the output of the command. Do NOT summarize or restate the command's output.
 - If the user is asking about a command (explanatory), answer concisely and include a one-line example, then a brief explanation of key flags.
 - After running a command via the tool, use its output to decide next steps. You may call tools multiple times until the task is complete.

@@ -13,7 +13,7 @@ use config::{
 };
 
 mod chat;
-mod chat_render;
+
 
 #[derive(Parser)]
 #[command(name = "tai")]
