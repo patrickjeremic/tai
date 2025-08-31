@@ -21,6 +21,13 @@ impl Tool for ShellCommandTool {
         return "Execute a Linux shell command on the user's machine. The machine runs Linux. The user can see the command output! Use for tasks that require terminal operations. Always prefer safe, idempotent commands and avoid destructive operations.";
         #[cfg(target_os = "macos")]
         return "Execute a Mac OS shell command on the user's machine. The machine runs Mac OS. The user can see the command output! Use for tasks that require terminal operations. Always prefer safe, idempotent commands and avoid destructive operations.";
+
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "macos"
+        )))]
+        return "Execute a shell command on the user's machine. The user can see the command output! Use for tasks that require terminal operations. Always prefer safe, idempotent commands and avoid destructive operations.";
     }
     fn required_params(&self) -> &'static [&'static str] {
         &["command"]
@@ -114,7 +121,7 @@ impl Tool for ShellCommandTool {
                 let _ = child.kill();
                 break Err(anyhow!("timeout after {}s", timeout));
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(500));
         };
 
         // TODO: make this a textbox as well (like for regular output) but increase size a bit and
@@ -130,6 +137,7 @@ impl Tool for ShellCommandTool {
                 } else {
                     format!("{}\n{}", stdout, stderr)
                 };
+                println!("{}", combined);
                 Ok(json!({
                     "command": command,
                     "executed": true,
