@@ -14,7 +14,6 @@ use config::{
 
 mod chat;
 
-
 #[derive(Parser)]
 #[command(name = "tai")]
 #[command(about = "Terminal AI Assistant")]

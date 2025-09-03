@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use nu_ansi_term::{Color as NuColor, Style};
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::Duration;
@@ -143,6 +144,40 @@ impl Tool for ShellCommandTool {
                 "executed": false,
                 "error": e.to_string(),
             })),
+        }
+    }
+
+    fn print_result(&self, result: &Value) {
+        let result_label = Style::new().fg(NuColor::LightMagenta).paint("result");
+        let executed = result
+            .get("executed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let copied = result
+            .get("copied")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if copied {
+            println!("{}: command copied to clipboard", result_label);
+        } else if executed {
+            let output = result.get("output").and_then(|v| v.as_str()).unwrap_or("");
+            if !output.is_empty() {
+                println!("{}:\n{}", result_label, output);
+            } else {
+                let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+                let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                if !stdout.is_empty() {
+                    println!("{} (stdout):\n{}", result_label, stdout);
+                }
+                if !stderr.is_empty() {
+                    println!("{} (stderr):\n{}", result_label, stderr);
+                }
+            }
+        } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+            println!("{}: {}", result_label, err);
+        } else {
+            println!("{}: command not executed", result_label);
         }
     }
 }

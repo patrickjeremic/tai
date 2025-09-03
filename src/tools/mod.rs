@@ -34,6 +34,15 @@ pub trait Tool: Send + Sync {
         builder.function(fb)
     }
     fn execute_blocking(&self, args: Value) -> Result<Value>;
+
+    /// Format and print the result of this tool execution.
+    /// Default implementation prints JSON, tools can override for custom formatting.
+    fn print_result(&self, result: &Value) {
+        use nu_ansi_term::{Color as NuColor, Style};
+        let result_label = Style::new().fg(NuColor::LightMagenta).paint("result");
+        let pretty = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".into());
+        println!("{}:\n{}", result_label, pretty);
+    }
 }
 
 pub struct ToolsRegistry {
@@ -80,13 +89,14 @@ impl ToolsRegistry {
         }
         None
     }
-    pub fn handle_tool_call(&self, call: &ToolCall) -> Result<Value> {
+    pub fn handle_tool_call(&self, call: &ToolCall) -> Result<(Value, &dyn Tool)> {
         let name = &call.function.name;
         let args: Value = serde_json::from_str(&call.function.arguments)
             .with_context(|| format!("Failed parsing tool args for {}", name))?;
         let tool = self
             .find(name)
             .ok_or_else(|| anyhow!("Unknown tool: {}", name))?;
-        tool.execute_blocking(args)
+        let result = tool.execute_blocking(args)?;
+        Ok((result, tool))
     }
 }

@@ -12,7 +12,6 @@ use serde_json::Value as JsonValue;
 use std::io::Write;
 use terminal_size::{terminal_size, Width};
 
-
 use crate::config::{find_context_files, load_config, select_effective_provider};
 use crate::history::History;
 use crate::tools::ToolsRegistry;
@@ -129,8 +128,6 @@ pub struct Session<'a> {
     file_history: History,
     context_added: bool,
 }
-
-
 
 pub fn setup(tools: &ToolsRegistry) -> Result<Box<dyn LLMProvider>> {
     let cfg = load_config().unwrap_or_default();
@@ -260,32 +257,8 @@ impl<'a> Session<'a> {
                             println!("{}:\n{}", args_label, formatted);
 
                             match self.tools.handle_tool_call(call) {
-                                Ok(result) => {
-                                    let result_label = Style::new().fg(NuColor::LightMagenta).paint("result");
-                                    if name == "run_shell" {
-                                        let executed = result.get("executed").and_then(|v| v.as_bool()).unwrap_or(false);
-                                        let copied = result.get("copied").and_then(|v| v.as_bool()).unwrap_or(false);
-                                        if copied {
-                                            println!("{}: command copied to clipboard", result_label);
-                                        } else if executed {
-                                            let output = result.get("output").and_then(|v| v.as_str()).unwrap_or("");
-                                            if !output.is_empty() {
-                                                println!("{}:\n{}", result_label, output);
-                                            } else {
-                                                let stdout = result.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-                                                let stderr = result.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-                                                if !stdout.is_empty() { println!("{} (stdout):\n{}", result_label, stdout); }
-                                                if !stderr.is_empty() { println!("{} (stderr):\n{}", result_label, stderr); }
-                                            }
-                                        } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
-                                            println!("{}: {}", result_label, err);
-                                        } else {
-                                            println!("{}: command not executed", result_label);
-                                        }
-                                    } else {
-                                        let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into());
-                                        println!("{}:\n{}", result_label, pretty);
-                                    }
+                                Ok((result, tool)) => {
+                                    tool.print_result(&result);
 
                                     tool_results.push(llm::ToolCall {
                                         id: call.id.clone(),
@@ -346,11 +319,11 @@ impl<'a> Session<'a> {
                 let text = {
                     let mut buf = String::new();
                     let darker_style = Style::new().fg(NuColor::Rgb(160, 160, 160));
-                    
+
                     // Flush any pending output before starting streaming
                     std::io::stdout().flush().ok();
                     std::io::stderr().flush().ok();
-                    
+
                     // Display bat-style separator line
                     let sz = terminal_size();
                     let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
@@ -358,7 +331,7 @@ impl<'a> Session<'a> {
                     let separator_style = Style::new().fg(NuColor::Rgb(100, 100, 100));
                     println!("{}", separator_style.paint(&separator));
                     std::io::stdout().flush().ok();
-                    
+
                     match self.llm.chat_stream_struct(&self.history).await {
                         Ok(mut stream) => {
                             while let Some(chunk) = stream.next().await {
@@ -400,7 +373,7 @@ impl<'a> Session<'a> {
                         }
                     }
                 };
-                
+
                 println!(); // Add newline after streaming
 
                 self.file_history
@@ -417,7 +390,7 @@ impl<'a> Session<'a> {
                         print!("\x1b[{}M", line_count);
                     }
                     std::io::stdout().flush().ok();
-                    
+
                     let mut printer = PrettyPrinter::new();
                     printer
                         .input_from_bytes(text.as_bytes())
