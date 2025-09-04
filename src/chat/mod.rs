@@ -133,7 +133,7 @@ pub fn setup(tools: &ToolsRegistry) -> Result<Box<dyn LLMProvider>> {
     let cfg = load_config().unwrap_or_default();
     let eff = select_effective_provider(&cfg);
 
-    let mut builder = LLMBuilder::new().stream(true);
+    let mut builder = LLMBuilder::new();
     let is_openai_gpt5 =
         eff.name == "openai" && (eff.model.starts_with("gpt-5") || eff.model.starts_with("gpt-5-"));
     if !is_openai_gpt5 {
@@ -316,7 +316,7 @@ impl<'a> Session<'a> {
                 }
 
 
-                let text = {
+                let (text, total_lines_to_clear) = {
                     let mut buf = String::new();
                     let darker_style = Style::new().fg(NuColor::Rgb(160, 160, 160));
 
@@ -324,13 +324,24 @@ impl<'a> Session<'a> {
                     std::io::stdout().flush().ok();
                     std::io::stderr().flush().ok();
 
-                    // Display bat-style separator line
+                    // Get terminal dimensions
                     let sz = terminal_size();
                     let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
+                    
+                    // Mark the start position with a unique invisible marker
+                    // We'll count how many lines we output from here
+                    let mut lines_output = 0;
+
+                    // Display bat-style separator line
                     let separator = "─".repeat(term_cols);
                     let separator_style = Style::new().fg(NuColor::Rgb(100, 100, 100));
                     println!("{}", separator_style.paint(&separator));
+                    lines_output += 1;
                     std::io::stdout().flush().ok();
+
+                    // Track lines during streaming
+                    let mut stream_lines = 0;
+                    let mut current_line_len = 0;
 
                     match self.llm.chat_stream_struct(&self.history).await {
                         Ok(mut stream) => {
@@ -341,6 +352,22 @@ impl<'a> Session<'a> {
                                             if let Some(content) = &delta.content {
                                                 buf.push_str(content);
                                                 print!("{}", darker_style.paint(content));
+                                                
+                                                // Track lines for proper clearing
+                                                for ch in content.chars() {
+                                                    if ch == '\n' {
+                                                        stream_lines += 1;
+                                                        current_line_len = 0;
+                                                    } else {
+                                                        current_line_len += 1;
+                                                        // Check for line wrap
+                                                        if current_line_len >= term_cols {
+                                                            stream_lines += 1;
+                                                            current_line_len = 0;
+                                                        }
+                                                    }
+                                                }
+                                                
                                                 std::io::stdout().flush().ok();
                                             }
                                         }
@@ -350,7 +377,10 @@ impl<'a> Session<'a> {
                                     }
                                 }
                             }
-                            buf
+                            // Account for any remaining partial line
+                            if current_line_len > 0 {
+                                stream_lines += 1;
+                            }
                         }
                         Err(_e) => {
                             // Fallback to simple string streaming
@@ -360,21 +390,41 @@ impl<'a> Session<'a> {
                                         if let Ok(token) = delta {
                                             buf.push_str(&token);
                                             print!("{}", darker_style.paint(&token));
+                                            
+                                            // Track lines for proper clearing
+                                            for ch in token.chars() {
+                                                if ch == '\n' {
+                                                    stream_lines += 1;
+                                                    current_line_len = 0;
+                                                } else {
+                                                    current_line_len += 1;
+                                                    // Check for line wrap
+                                                    if current_line_len >= term_cols {
+                                                        stream_lines += 1;
+                                                        current_line_len = 0;
+                                                    }
+                                                }
+                                            }
+                                            
                                             std::io::stdout().flush().ok();
                                         }
                                     }
-                                    buf
+                                    // Account for any remaining partial line
+                                    if current_line_len > 0 {
+                                        stream_lines += 1;
+                                    }
                                 }
                                 Err(_e2) => {
                                     eprintln!("Error: streaming failed");
-                                    String::new()
                                 }
                             }
                         }
                     }
+                    
+                    println!(); // Add newline after streaming
+                    let total = lines_output + stream_lines + 1; // +1 for the newline we just added
+                    (buf, total)
                 };
-
-                println!(); // Add newline after streaming
 
                 self.file_history
                     .add_entry(input.to_string(), text.clone())?;
@@ -383,12 +433,11 @@ impl<'a> Session<'a> {
                 let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
 
                 {
-                    // Clear the streamed output and separator line
-                    let line_count = text.lines().count() + 1;
-                    print!("\x1b[{}A\x1b[G", line_count);
-                    if line_count > 0 {
-                        print!("\x1b[{}M", line_count);
-                    }
+                    // Clear the streamed output using calculated line count
+                    // Move cursor up by the total number of lines output
+                    print!("\x1b[{}A", total_lines_to_clear);
+                    // Clear from cursor to end of screen
+                    print!("\x1b[0J");
                     std::io::stdout().flush().ok();
 
                     let mut printer = PrettyPrinter::new();
