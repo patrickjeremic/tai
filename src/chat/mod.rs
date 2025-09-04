@@ -384,7 +384,7 @@ impl<'a> Session<'a> {
 
                 {
                     // Clear the streamed output and separator line
-                    let line_count = text.lines().count() + 2; // +1 for newline, +1 for separator
+                    let line_count = text.lines().count() + 1;
                     print!("\x1b[{}A\x1b[G", line_count);
                     if line_count > 0 {
                         print!("\x1b[{}M", line_count);

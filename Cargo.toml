@@ -21,7 +21,7 @@ tokio = { version = "1.40", features = [
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 
-llm = { version = "1.2", features = [
+llm = { version = "1.3.4", features = [
     "openai",
     "anthropic",
     "ollama",
@@ -56,8 +56,4 @@ nu-ansi-term = "0.50"
 terminal_size = "0.4"
 
 # Pretty printing & paging
-bat = { version = "0.25", features = [
-    "regex-fancy",
-    "paging",
-] }
-
+bat = { version = "0.25", features = ["regex-fancy", "paging"] }
