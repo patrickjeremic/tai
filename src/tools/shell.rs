@@ -124,8 +124,6 @@ impl Tool for ShellCommandTool {
             std::thread::sleep(Duration::from_millis(500));
         };
 
-        // TODO: make this a textbox as well (like for regular output) but increase size a bit and
-        // do not clear it after it finished.
         match status_output {
             Ok((status, output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
