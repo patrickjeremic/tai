@@ -10,7 +10,7 @@ use llm::{
 use nu_ansi_term::{Color as NuColor, Style};
 use serde_json::Value as JsonValue;
 use std::io::Write;
-use terminal_size::{terminal_size, Width};
+use terminal_size::{terminal_size, Height, Width};
 
 use crate::config::{find_context_files, load_config, select_effective_provider};
 use crate::history::History;
@@ -315,31 +315,24 @@ impl<'a> Session<'a> {
                     }
                 }
 
+                let sz = terminal_size();
+                let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
 
                 let (text, total_lines_to_clear) = {
                     let mut buf = String::new();
                     let darker_style = Style::new().fg(NuColor::Rgb(160, 160, 160));
 
-                    // Flush any pending output before starting streaming
                     std::io::stdout().flush().ok();
                     std::io::stderr().flush().ok();
 
-                    // Get terminal dimensions
-                    let sz = terminal_size();
-                    let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
-                    
-                    // Mark the start position with a unique invisible marker
-                    // We'll count how many lines we output from here
                     let mut lines_output = 0;
 
-                    // Display bat-style separator line
                     let separator = "─".repeat(term_cols);
                     let separator_style = Style::new().fg(NuColor::Rgb(100, 100, 100));
                     println!("{}", separator_style.paint(&separator));
                     lines_output += 1;
                     std::io::stdout().flush().ok();
 
-                    // Track lines during streaming
                     let mut stream_lines = 0;
                     let mut current_line_len = 0;
 
@@ -352,67 +345,54 @@ impl<'a> Session<'a> {
                                             if let Some(content) = &delta.content {
                                                 buf.push_str(content);
                                                 print!("{}", darker_style.paint(content));
-                                                
-                                                // Track lines for proper clearing
+
                                                 for ch in content.chars() {
                                                     if ch == '\n' {
                                                         stream_lines += 1;
                                                         current_line_len = 0;
                                                     } else {
                                                         current_line_len += 1;
-                                                        // Check for line wrap
                                                         if current_line_len >= term_cols {
                                                             stream_lines += 1;
                                                             current_line_len = 0;
                                                         }
                                                     }
                                                 }
-                                                
+
                                                 std::io::stdout().flush().ok();
                                             }
                                         }
                                     }
-                                    Err(_e) => {
-                                        // Silently continue - errors might be normal for some providers
-                                    }
+                                    Err(_e) => {}
                                 }
                             }
-                            // Account for any remaining partial line
-                            if current_line_len > 0 {
-                                stream_lines += 1;
-                            }
+                            if current_line_len > 0 { stream_lines += 1; }
                         }
                         Err(_e) => {
-                            // Fallback to simple string streaming
                             match self.llm.chat_stream(&self.history).await {
                                 Ok(mut stream) => {
                                     while let Some(delta) = stream.next().await {
                                         if let Ok(token) = delta {
                                             buf.push_str(&token);
                                             print!("{}", darker_style.paint(&token));
-                                            
-                                            // Track lines for proper clearing
+
                                             for ch in token.chars() {
                                                 if ch == '\n' {
                                                     stream_lines += 1;
                                                     current_line_len = 0;
                                                 } else {
                                                     current_line_len += 1;
-                                                    // Check for line wrap
                                                     if current_line_len >= term_cols {
                                                         stream_lines += 1;
                                                         current_line_len = 0;
                                                     }
                                                 }
                                             }
-                                            
+
                                             std::io::stdout().flush().ok();
                                         }
                                     }
-                                    // Account for any remaining partial line
-                                    if current_line_len > 0 {
-                                        stream_lines += 1;
-                                    }
+                                    if current_line_len > 0 { stream_lines += 1; }
                                 }
                                 Err(_e2) => {
                                     eprintln!("Error: streaming failed");
@@ -420,25 +400,21 @@ impl<'a> Session<'a> {
                             }
                         }
                     }
-                    
-                    println!(); // Add newline after streaming
-                    let total = lines_output + stream_lines + 1; // +1 for the newline we just added
+
+                    println!();
+                    let total = lines_output + stream_lines + 1;
                     (buf, total)
                 };
 
                 self.file_history
                     .add_entry(input.to_string(), text.clone())?;
 
-                let sz = terminal_size();
-                let term_cols = match sz { Some((Width(w), _)) => w as usize, None => 80 };
-
                 {
-                    // Clear the streamed output using calculated line count
-                    // Move cursor up by the total number of lines output
-                    print!("\x1b[{}A", total_lines_to_clear);
-                    // Clear from cursor to end of screen
-                    print!("\x1b[0J");
-                    std::io::stdout().flush().ok();
+                    if total_lines_to_clear > 0 {
+                        print!("\x1b[{}A", total_lines_to_clear);
+                        print!("\x1b[0J");
+                        std::io::stdout().flush().ok();
+                    }
 
                     let mut printer = PrettyPrinter::new();
                     printer
@@ -497,6 +473,14 @@ impl<'a> Session<'a> {
         let os = "Linux";
         #[cfg(target_os = "macos")]
         let os = "Mac OS";
+
+        let sz = terminal_size();
+        let term_lines = match sz {
+            Some((_, Height(h))) => h as usize,
+            None => 50,
+        };
+        let max_words = (term_lines - 6) * 16;
+
         format!(
             r#"You are an AI assistant running in a terminal that can call tools to operate on the user's machine.
 Your goal is to help the user achieve their task efficiently and safely.
@@ -509,6 +493,7 @@ System rules:
 - If the user is asking about a command (explanatory), answer concisely and include a one-line example, then a brief explanation of key flags.
 - After running a command via the tool, use its output to decide next steps. You may call tools multiple times until the task is complete.
 - Do not invent file paths or secrets. Never print sensitive values.
+- Keep your answer short and concise. Do not exceed {max_words} words!
 - When you include code, always use fenced code blocks with a language identifier like ```rust, ```bash, ```python, etc. Avoid plain triple backticks without a language.
 - Always respond using Markdown syntax.
 

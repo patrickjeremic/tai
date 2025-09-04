@@ -37,12 +37,16 @@ pub trait Tool: Send + Sync {
 
     /// Format and print the result of this tool execution.
     /// Default implementation prints JSON, tools can override for custom formatting.
+    #[cfg(debug_assertions)]
     fn print_result(&self, result: &Value) {
         use nu_ansi_term::{Color as NuColor, Style};
         let result_label = Style::new().fg(NuColor::LightMagenta).paint("result");
         let pretty = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".into());
         println!("{}:\n{}", result_label, pretty);
     }
+
+    #[cfg(not(debug_assertions))]
+    fn print_result(&self, _result: &Value) {}
 }
 
 pub struct ToolsRegistry {

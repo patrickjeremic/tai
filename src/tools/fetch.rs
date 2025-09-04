@@ -123,4 +123,22 @@ impl Tool for FetchUrlTool {
             "text": text,
         }))
     }
+
+    fn print_result(&self, result: &Value) {
+        use nu_ansi_term::{Color as NuColor, Style};
+        let result_label = Style::new().fg(NuColor::LightMagenta).paint("result");
+        println!(
+            "{}: {}",
+            result_label,
+            result
+                .get("status")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Error".to_string()),
+            // result
+            //     .get("final_url")
+            //     .or_else(|| result.get("url"))
+            //     .map(|s| s.to_string())
+            //     .unwrap_or_else(|| "unknown".to_string())
+        );
+    }
 }
